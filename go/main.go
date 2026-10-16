@@ -87,6 +87,7 @@ type lifecycleRequest struct {
 
 type accountConfig struct {
 	AuthID           string  `yaml:"auth_id"`
+	Match            string  `yaml:"match"`
 	Reserve5hPercent float64 `yaml:"reserve_5h_percent"`
 	Reserve7dPercent float64 `yaml:"reserve_7d_percent"`
 }
@@ -210,6 +211,10 @@ func configure(raw []byte) error {
 	}
 	for i := range cfg.Accounts {
 		cfg.Accounts[i].AuthID = strings.TrimSpace(cfg.Accounts[i].AuthID)
+		cfg.Accounts[i].Match = strings.ToLower(strings.TrimSpace(cfg.Accounts[i].Match))
+		if cfg.Accounts[i].Match == "" {
+			cfg.Accounts[i].Match = "exact"
+		}
 	}
 	currentConfig.Store(cfg)
 
@@ -268,7 +273,7 @@ func pluginRegistration() registration {
 				{
 					Name:        "accounts",
 					Type:        pluginapi.ConfigFieldTypeString,
-					Description: "List of {auth_id, reserve_5h_percent, reserve_7d_percent} entries. Only listed auth IDs are subject to quota reservation; all other candidates are left untouched.",
+					Description: "List of {auth_id, match, reserve_5h_percent, reserve_7d_percent} entries. match is exact (default) or contains; only matching auth IDs are subject to quota reservation.",
 				},
 			},
 		},
@@ -376,16 +381,9 @@ func pickAuth(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
-	limits := make(map[string]accountConfig, len(cfg.Accounts))
-	for _, acct := range cfg.Accounts {
-		if acct.AuthID != "" {
-			limits[acct.AuthID] = acct
-		}
-	}
-
 	configuredPresent := false
 	for _, candidate := range req.Candidates {
-		if _, ok := limits[candidate.ID]; ok {
+		if _, ok := matchingAccount(candidate.ID, cfg.Accounts); ok {
 			configuredPresent = true
 			break
 		}
@@ -399,7 +397,7 @@ func pickAuth(raw []byte) ([]byte, error) {
 	stateMu.Lock()
 	eligible := make([]pluginapi.SchedulerAuthCandidate, 0, len(req.Candidates))
 	for _, candidate := range req.Candidates {
-		acct, configured := limits[candidate.ID]
+		acct, configured := matchingAccount(candidate.ID, cfg.Accounts)
 		if !configured {
 			eligible = append(eligible, candidate)
 			continue
@@ -462,6 +460,34 @@ func pickAuth(raw []byte) ([]byte, error) {
 		AuthID:  group[idx].ID,
 		Handled: true,
 	})
+}
+
+// matchingAccount prefers exact rules and then the most specific contains rule.
+// This keeps a broad email/domain rule from shadowing a more specific account rule.
+func matchingAccount(candidateID string, accounts []accountConfig) (accountConfig, bool) {
+	for _, acct := range accounts {
+		if acct.AuthID != "" && acct.Match != "contains" && candidateID == acct.AuthID {
+			return acct, true
+		}
+	}
+
+	var best accountConfig
+	bestLen := 0
+	candidateLower := strings.ToLower(candidateID)
+	for _, acct := range accounts {
+		if acct.AuthID == "" || acct.Match != "contains" {
+			continue
+		}
+		needle := strings.ToLower(acct.AuthID)
+		if len(needle) > bestLen && strings.Contains(candidateLower, needle) {
+			best = acct
+			bestLen = len(needle)
+		}
+	}
+	if bestLen > 0 {
+		return best, true
+	}
+	return accountConfig{}, false
 }
 
 func loadedConfig() pluginConfig {

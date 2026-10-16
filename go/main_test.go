@@ -66,6 +66,47 @@ func TestPickAuthHardModeUsesUnconfiguredFallback(t *testing.T) {
 	}
 }
 
+func TestPickAuthContainsMatchBlocksMatchingAuthID(t *testing.T) {
+	currentConfig.Store(pluginConfig{
+		HardBlockWhenAllReserved: true,
+		Accounts: []accountConfig{{
+			AuthID:           "rueggroup@gmail.com",
+			Match:            "contains",
+			Reserve5hPercent: 20,
+			Reserve7dPercent: 20,
+		}},
+	})
+	stateMu.Lock()
+	state = map[string]*accountState{
+		"claude-aaca225d-rueggroup@gmail.com.json": {Util5h: 0.8, Reset5h: 4102444800},
+	}
+	stateMu.Unlock()
+	t.Cleanup(func() {
+		stateMu.Lock()
+		state = map[string]*accountState{}
+		stateMu.Unlock()
+	})
+
+	raw, errPick := pickAuth(schedulerRequestJSON(t, "claude-aaca225d-rueggroup@gmail.com.json"))
+	if errPick != nil {
+		t.Fatalf("pickAuth() error = %v", errPick)
+	}
+	var got envelope
+	if errUnmarshal := json.Unmarshal(raw, &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if got.OK || got.Error == nil || got.Error.HTTPStatus != 429 {
+		t.Fatalf("pickAuth() response = %#v, want quota error", got)
+	}
+}
+
+func TestMatchingAccountDefaultsToExact(t *testing.T) {
+	acct, ok := matchingAccount("claude-aaca225d-rueggroup@gmail.com.json", []accountConfig{{AuthID: "rueggroup@gmail.com"}})
+	if ok || acct.AuthID != "" {
+		t.Fatalf("matchingAccount() = %#v, %v; default match must be exact", acct, ok)
+	}
+}
+
 func configurePickAuthTest(t *testing.T, hardBlock bool) {
 	t.Helper()
 	currentConfig.Store(pluginConfig{

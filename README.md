@@ -71,6 +71,7 @@ plugins:
       hard_block_when_all_reserved: true
       accounts:
         - auth_id: "<Auth.ID of the borrowed account>"
+          match: exact
           reserve_5h_percent: 20
           reserve_7d_percent: 20
 ```
@@ -83,10 +84,13 @@ Fields:
 - `hard_block_when_all_reserved`: when `true`, return HTTP 429 instead of
   delegating to the built-in scheduler if every candidate is below reserve.
   Defaults to `false` for backward compatibility.
-- `accounts`: list of `auth_id` / `reserve_5h_percent` / `reserve_7d_percent`
-  entries. Find `auth_id` via the management API's auth listing endpoint — it
-  is `Auth.ID`, which is stable across restarts. Accounts not listed here are
-  never touched by this plugin.
+- `accounts`: list of `auth_id` / `match` / `reserve_5h_percent` /
+  `reserve_7d_percent` entries. `match` defaults to `exact`; set it to
+  `contains` for a stable email fragment such as `rueggroup@gmail.com` when
+  the host adds changing prefixes or suffixes to OAuth auth IDs. Contains
+  matching is case-insensitive, exact matching remains case-sensitive, and an
+  exact rule wins over a contains rule. Accounts not matched here are never
+  touched by this plugin.
 
 ## Build
 

@@ -3,23 +3,23 @@
 Out-of-process CLIProxyAPI plugin (`anthropic-quota-reserve`) that reserves a
 percentage of Anthropic's real 5h/7d subscription quota for specific auth IDs.
 
-## Build
+## Build & deploy
 
-```bash
-cd go
-go build -buildmode=c-shared -o ../anthropic-quota-reserve.so .
-```
+**Never build or copy a `.so` to production by hand.** On 2026-10-16 a build cut
+from a stale checkout silently dropped `scheduler_across_priorities`, and every
+Claude request 429'd once the borrowed top-tier account hit its reserve. Deploy
+only via the infrastructure repo's `scripts/cheesepad-cpa-quota-plugin-deploy.sh`
+(clean + pushed commit only, builds `git archive` in `golang:1.26-bookworm`,
+stamps `version=0.1.0+<sha>`, verifies, auto-rollback). Commit AND push before
+deploying; `git fetch` first — this repo has been pushed from more than one place.
 
 Verify compile only (no output kept):
 
 ```bash
-cd go && go build -buildmode=c-shared -o /tmp/anthropic-quota-reserve.so . && rm /tmp/anthropic-quota-reserve.so
+cd go && go test ./... && go build -buildmode=c-shared -o /tmp/anthropic-quota-reserve.so . && rm /tmp/anthropic-quota-reserve.so
 ```
 
-Deploy: copy `anthropic-quota-reserve.so` into the target CLIProxyAPI's
-`plugins/` dir (must be a host-mounted volume there, or it's wiped on
-container recreation), set `plugins.enabled: true`, add the
-`anthropic-quota-reserve` config block from README.md under `plugins.configs`.
+`TestRegistrationOptsIntoAcrossPriorities` guards the flag — don't delete it.
 
 ## Architecture
 

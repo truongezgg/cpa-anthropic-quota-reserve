@@ -70,7 +70,7 @@ func TestPickAuthContainsMatchBlocksMatchingAuthID(t *testing.T) {
 	currentConfig.Store(pluginConfig{
 		HardBlockWhenAllReserved: true,
 		Accounts: []accountConfig{{
-			AuthID:           "rueggroup@gmail.com",
+			AuthID:           "borrowed@example.com",
 			Match:            "contains",
 			Reserve5hPercent: 20,
 			Reserve7dPercent: 20,
@@ -78,7 +78,7 @@ func TestPickAuthContainsMatchBlocksMatchingAuthID(t *testing.T) {
 	})
 	stateMu.Lock()
 	state = map[string]*accountState{
-		"claude-aaca225d-rueggroup@gmail.com.json": {Util5h: 0.8, Reset5h: 4102444800},
+		"claude-0000aaaa-borrowed@example.com.json": {Util5h: 0.8, Reset5h: 4102444800},
 	}
 	stateMu.Unlock()
 	t.Cleanup(func() {
@@ -87,7 +87,7 @@ func TestPickAuthContainsMatchBlocksMatchingAuthID(t *testing.T) {
 		stateMu.Unlock()
 	})
 
-	raw, errPick := pickAuth(schedulerRequestJSON(t, "claude-aaca225d-rueggroup@gmail.com.json"))
+	raw, errPick := pickAuth(schedulerRequestJSON(t, "claude-0000aaaa-borrowed@example.com.json"))
 	if errPick != nil {
 		t.Fatalf("pickAuth() error = %v", errPick)
 	}
@@ -101,7 +101,7 @@ func TestPickAuthContainsMatchBlocksMatchingAuthID(t *testing.T) {
 }
 
 func TestMatchingAccountDefaultsToExact(t *testing.T) {
-	acct, ok := matchingAccount("claude-aaca225d-rueggroup@gmail.com.json", []accountConfig{{AuthID: "rueggroup@gmail.com"}})
+	acct, ok := matchingAccount("claude-0000aaaa-borrowed@example.com.json", []accountConfig{{AuthID: "borrowed@example.com"}})
 	if ok || acct.AuthID != "" {
 		t.Fatalf("matchingAccount() = %#v, %v; default match must be exact", acct, ok)
 	}
@@ -112,7 +112,7 @@ func TestPickAuthContainsMatchFallsThroughToLowerTier(t *testing.T) {
 	currentConfig.Store(pluginConfig{
 		HardBlockWhenAllReserved: true,
 		Accounts: []accountConfig{{
-			AuthID:           "rueggroup@gmail.com",
+			AuthID:           "borrowed@example.com",
 			Match:            "contains",
 			Reserve5hPercent: 20,
 			Reserve7dPercent: 20,
@@ -120,17 +120,26 @@ func TestPickAuthContainsMatchFallsThroughToLowerTier(t *testing.T) {
 	})
 	stateMu.Lock()
 	state = map[string]*accountState{
-		"claude-aaca225d-rueggroup@gmail.com.json": {Util5h: 0.8, Reset5h: 4102444800},
+		"claude-0000aaaa-borrowed@example.com.json": {Util5h: 0.8, Reset5h: 4102444800},
 	}
 	stateMu.Unlock()
 
 	result := pickResult(t, tieredRequestJSON(t, "",
-		testCandidate{"claude-aaca225d-rueggroup@gmail.com.json", 5},
+		testCandidate{"claude-0000aaaa-borrowed@example.com.json", 5},
 		testCandidate{"claude-99cd37b2.json", 4},
 		testCandidate{"claude-4c6c120c.json", 2},
 	))
 	if !result.Handled || result.AuthID != "claude-99cd37b2.json" {
 		t.Fatalf("pickAuth() = %#v, want the next priority tier instead of a 429", result)
+	}
+}
+
+// The host only offers a scheduler plugin the top priority tier unless it opts
+// in here; losing this flag makes a reserved top-tier account 429 every request.
+func TestRegistrationOptsIntoAcrossPriorities(t *testing.T) {
+	caps := pluginRegistration().Capabilities
+	if !caps.Scheduler || !caps.SchedulerAcrossPriorities || !caps.UsagePlugin {
+		t.Fatalf("capabilities = %#v, want scheduler + scheduler_across_priorities + usage_plugin", caps)
 	}
 }
 

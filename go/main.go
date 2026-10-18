@@ -68,6 +68,11 @@ var sessionHeaders = []string{
 	"X-Slot-Session-Id",
 }
 
+// buildCommit is stamped at build time (-ldflags "-X main.buildCommit=<sha>")
+// so the host's "plugin registered ... version=" log line names the exact
+// source the running .so came from.
+var buildCommit = "dev"
+
 var currentConfig atomic.Value // pluginConfig
 
 var (
@@ -277,7 +282,7 @@ func pluginRegistration() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "anthropic-quota-reserve",
-			Version:          "0.1.0",
+			Version:          "0.1.0+" + buildCommit,
 			Author:           "router-for-me",
 			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
 			Logo:             "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/docs/logo.png",

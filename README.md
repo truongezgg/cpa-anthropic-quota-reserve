@@ -94,21 +94,25 @@ Fields:
   Defaults to `false` for backward compatibility.
 - `accounts`: list of `auth_id` / `match` / `reserve_5h_percent` /
   `reserve_7d_percent` entries. `match` defaults to `exact`; set it to
-  `contains` for a stable email fragment such as `rueggroup@gmail.com` when
+  `contains` for a stable email fragment such as `borrowed@example.com` when
   the host adds changing prefixes or suffixes to OAuth auth IDs. Contains
   matching is case-insensitive, exact matching remains case-sensitive, and an
   exact rule wins over a contains rule. Accounts not matched here are never
   touched by this plugin.
 
-## Build
+## Build & deploy
 
-From this directory:
+Production (the Cheesepad CLIProxyAPI) is deployed **only** through the
+infrastructure repo's `scripts/cheesepad-cpa-quota-plugin-deploy.sh`. It
+refuses a dirty tree or an unpushed commit, builds `git archive <commit>` in
+`golang:1.26-bookworm` on the box (the CPA image is Debian bookworm), stamps
+the commit into the plugin version (`version=0.1.0+<sha>` in the host's
+`plugin registered` log), runs the tests, checks the `.so` still declares
+`scheduler_across_priorities`, swaps it atomically, restarts `cli-proxy-api`
+and rolls back if the plugin does not re-register with that commit.
+
+Local compile check only:
 
 ```bash
-cd go
-go build -buildmode=c-shared -o ../anthropic-quota-reserve.so .
+cd go && go test ./... && go build -buildmode=c-shared -o /tmp/anthropic-quota-reserve.so . && rm /tmp/anthropic-quota-reserve.so
 ```
-
-Copy `anthropic-quota-reserve.so` into your CLIProxyAPI `plugins/` dir, set
-`plugins.enabled: true`, and add the `anthropic-quota-reserve` config block
-above to your `config.yaml`.

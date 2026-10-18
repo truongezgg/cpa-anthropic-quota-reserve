@@ -30,9 +30,17 @@ If every candidate ends up excluded (e.g. all configured accounts are over
 budget and there's no unconfigured fallback), the default soft mode returns
 `handled: false` so the host's normal scheduler still picks something. Set
 `hard_block_when_all_reserved: true` to fail the request with HTTP 429 instead,
-ensuring a protected account is never selected below its reserve. Among
-remaining eligible candidates, the plugin mimics host priority grouping and
-round-robins within the top priority group.
+ensuring a protected account is never selected below its reserve.
+
+The plugin asks the host for candidates across **all** priority tiers
+(`scheduler_across_priorities`, supported by hosts built after 2026-09-17), so
+a protected account can sit at the top priority without getting stuck: once it
+is reserved, requests move to the highest remaining priority tier, and move
+back automatically after Anthropic's reset time. While no account is reserved
+the plugin does not intervene, so the host's own session affinity keeps prompt
+caches warm. While an account is reserved the plugin keeps each client session
+(`X-Claude-Code-Session-Id` and similar headers) on one account for up to 12h
+and round-robins new sessions within the chosen tier.
 
 This is a **soft budget** based on Anthropic's own self-reported utilization,
 not a hard rate limiter — it only reacts after utilization has been observed
@@ -71,6 +79,7 @@ plugins:
       hard_block_when_all_reserved: true
       accounts:
         - auth_id: "<Auth.ID of the borrowed account>"
+          match: exact
           reserve_5h_percent: 20
           reserve_7d_percent: 20
 ```
@@ -83,10 +92,13 @@ Fields:
 - `hard_block_when_all_reserved`: when `true`, return HTTP 429 instead of
   delegating to the built-in scheduler if every candidate is below reserve.
   Defaults to `false` for backward compatibility.
-- `accounts`: list of `auth_id` / `reserve_5h_percent` / `reserve_7d_percent`
-  entries. Find `auth_id` via the management API's auth listing endpoint — it
-  is `Auth.ID`, which is stable across restarts. Accounts not listed here are
-  never touched by this plugin.
+- `accounts`: list of `auth_id` / `match` / `reserve_5h_percent` /
+  `reserve_7d_percent` entries. `match` defaults to `exact`; set it to
+  `contains` for a stable email fragment such as `rueggroup@gmail.com` when
+  the host adds changing prefixes or suffixes to OAuth auth IDs. Contains
+  matching is case-insensitive, exact matching remains case-sensitive, and an
+  exact rule wins over a contains rule. Accounts not matched here are never
+  touched by this plugin.
 
 ## Build
 

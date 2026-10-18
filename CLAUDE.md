@@ -31,11 +31,17 @@ method dispatch) around two capabilities:
   in-memory `state` map.
 - `scheduler.pick` (`pickAuth`) — for auth IDs listed in config only, excludes
   a candidate once tracked utilization crosses `1 - reserve_percent/100`,
-  unless its Anthropic-reported `reset` timestamp has passed. Mimics host
-  priority grouping + round-robin among survivors. If every candidate ends up
-  excluded, soft mode returns `Handled:false`; with
-  `hard_block_when_all_reserved: true`, it returns HTTP 429 so the host cannot
-  fall back to a protected account.
+  unless its Anthropic-reported `reset` timestamp has passed. Registers
+  `scheduler_across_priorities`, so candidates span every priority tier (host
+  must include commit `b715526a`, 2026-09-17; older hosts ignore the flag and
+  only offer the top tier, which brings back the stuck-account problem). When
+  no candidate is blocked it returns `Handled:false` so host priority, strategy
+  and session affinity apply untouched. When something is blocked it picks from
+  the highest remaining priority value (larger = preferred, same as the host),
+  keeps each session (by session header) on the account it chose, and
+  round-robins new sessions. If every candidate ends up excluded, soft mode
+  returns `Handled:false`; with `hard_block_when_all_reserved: true`, it returns
+  HTTP 429 so the host cannot fall back to a protected account.
 
 State is flushed to `state_file` on a ticker (`flush_interval_seconds`) and on
 `plugin.shutdown`, and reloaded on `plugin.register`/`plugin.reconfigure` —

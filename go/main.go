@@ -35,6 +35,7 @@ import "C"
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,7 +53,20 @@ import (
 const (
 	defaultFlushIntervalSeconds = 300
 	headerPrefix                = "anthropic-ratelimit-unified-"
+	// stickyTTL matches the host's recommended session-affinity TTL so a session
+	// keeps one account for as long as the host itself would have kept it.
+	stickyTTL = 12 * time.Hour
 )
+
+// sessionHeaders are the client session identifiers the host's own session
+// affinity understands; the scheduler only sees headers, not the body.
+var sessionHeaders = []string{
+	"X-Claude-Code-Session-Id",
+	"X-Session-ID",
+	"X-Http-Session-Id",
+	"X-Session-Affinity",
+	"X-Slot-Session-Id",
+}
 
 var currentConfig atomic.Value // pluginConfig
 
@@ -65,6 +79,16 @@ var (
 var (
 	cursorMu sync.Mutex
 	cursors  = map[string]int{}
+)
+
+type stickyEntry struct {
+	authID   string
+	lastUsed time.Time
+}
+
+var (
+	stickyMu sync.Mutex
+	sticky   = map[string]stickyEntry{}
 )
 
 var flushOnce sync.Once
@@ -87,6 +111,7 @@ type lifecycleRequest struct {
 
 type accountConfig struct {
 	AuthID           string  `yaml:"auth_id"`
+	Match            string  `yaml:"match"`
 	Reserve5hPercent float64 `yaml:"reserve_5h_percent"`
 	Reserve7dPercent float64 `yaml:"reserve_7d_percent"`
 }
@@ -116,8 +141,11 @@ type registration struct {
 }
 
 type registrationCapability struct {
-	Scheduler   bool `json:"scheduler"`
-	UsagePlugin bool `json:"usage_plugin"`
+	Scheduler bool `json:"scheduler"`
+	// SchedulerAcrossPriorities makes the host offer every priority tier, so a
+	// reserved account alone in the top tier cannot hide healthy lower tiers.
+	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities"`
+	UsagePlugin               bool `json:"usage_plugin"`
 }
 
 func main() {}
@@ -210,6 +238,10 @@ func configure(raw []byte) error {
 	}
 	for i := range cfg.Accounts {
 		cfg.Accounts[i].AuthID = strings.TrimSpace(cfg.Accounts[i].AuthID)
+		cfg.Accounts[i].Match = strings.ToLower(strings.TrimSpace(cfg.Accounts[i].Match))
+		if cfg.Accounts[i].Match == "" {
+			cfg.Accounts[i].Match = "exact"
+		}
 	}
 	currentConfig.Store(cfg)
 
@@ -268,13 +300,14 @@ func pluginRegistration() registration {
 				{
 					Name:        "accounts",
 					Type:        pluginapi.ConfigFieldTypeString,
-					Description: "List of {auth_id, reserve_5h_percent, reserve_7d_percent} entries. Only listed auth IDs are subject to quota reservation; all other candidates are left untouched.",
+					Description: "List of {auth_id, match, reserve_5h_percent, reserve_7d_percent} entries. match is exact (default) or contains; only matching auth IDs are subject to quota reservation.",
 				},
 			},
 		},
 		Capabilities: registrationCapability{
-			Scheduler:   true,
-			UsagePlugin: true,
+			Scheduler:                 true,
+			SchedulerAcrossPriorities: true,
+			UsagePlugin:               true,
 		},
 	}
 }
@@ -376,16 +409,9 @@ func pickAuth(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
-	limits := make(map[string]accountConfig, len(cfg.Accounts))
-	for _, acct := range cfg.Accounts {
-		if acct.AuthID != "" {
-			limits[acct.AuthID] = acct
-		}
-	}
-
 	configuredPresent := false
 	for _, candidate := range req.Candidates {
-		if _, ok := limits[candidate.ID]; ok {
+		if _, ok := matchingAccount(candidate.ID, cfg.Accounts); ok {
 			configuredPresent = true
 			break
 		}
@@ -398,8 +424,9 @@ func pickAuth(raw []byte) ([]byte, error) {
 
 	stateMu.Lock()
 	eligible := make([]pluginapi.SchedulerAuthCandidate, 0, len(req.Candidates))
+	anyBlocked := false
 	for _, candidate := range req.Candidates {
-		acct, configured := limits[candidate.ID]
+		acct, configured := matchingAccount(candidate.ID, cfg.Accounts)
 		if !configured {
 			eligible = append(eligible, candidate)
 			continue
@@ -423,11 +450,19 @@ func pickAuth(raw []byte) ([]byte, error) {
 				blocked = true
 			}
 		}
-		if !blocked {
-			eligible = append(eligible, candidate)
+		if blocked {
+			anyBlocked = true
+			continue
 		}
+		eligible = append(eligible, candidate)
 	}
 	stateMu.Unlock()
+
+	// Nothing to protect: let the host's own priority, strategy and session
+	// affinity decide, so prompt caches stay bound to one account per session.
+	if !anyBlocked {
+		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+	}
 
 	if len(eligible) == 0 {
 		if cfg.HardBlockWhenAllReserved {
@@ -439,9 +474,17 @@ func pickAuth(raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 	}
 
+	// Picking here bypasses the host's session affinity, so keep sessions on
+	// the account this plugin last chose for them while it can still serve.
+	stickyKey := sessionStickyKey(req)
+	if authID, ok := lookupSticky(stickyKey, eligible); ok {
+		return okEnvelope(pluginapi.SchedulerPickResponse{AuthID: authID, Handled: true})
+	}
+
+	// The host treats a larger priority value as more preferred.
 	topPriority := eligible[0].Priority
 	for _, c := range eligible[1:] {
-		if c.Priority < topPriority {
+		if c.Priority > topPriority {
 			topPriority = c.Priority
 		}
 	}
@@ -458,10 +501,86 @@ func pickAuth(raw []byte) ([]byte, error) {
 	cursors[cursorKey] = cursors[cursorKey] + 1
 	cursorMu.Unlock()
 
+	authID := group[idx].ID
+	rememberSticky(stickyKey, authID)
 	return okEnvelope(pluginapi.SchedulerPickResponse{
-		AuthID:  group[idx].ID,
+		AuthID:  authID,
 		Handled: true,
 	})
+}
+
+// matchingAccount prefers exact rules and then the most specific contains rule.
+// This keeps a broad email/domain rule from shadowing a more specific account rule.
+func matchingAccount(candidateID string, accounts []accountConfig) (accountConfig, bool) {
+	for _, acct := range accounts {
+		if acct.AuthID != "" && acct.Match != "contains" && candidateID == acct.AuthID {
+			return acct, true
+		}
+	}
+
+	var best accountConfig
+	bestLen := 0
+	candidateLower := strings.ToLower(candidateID)
+	for _, acct := range accounts {
+		if acct.AuthID == "" || acct.Match != "contains" {
+			continue
+		}
+		needle := strings.ToLower(acct.AuthID)
+		if len(needle) > bestLen && strings.Contains(candidateLower, needle) {
+			best = acct
+			bestLen = len(needle)
+		}
+	}
+	if bestLen > 0 {
+		return best, true
+	}
+	return accountConfig{}, false
+}
+
+func sessionStickyKey(req pluginapi.SchedulerPickRequest) string {
+	headers := http.Header(req.Options.Headers)
+	for _, name := range sessionHeaders {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return req.Provider + "|" + req.Model + "|" + value
+		}
+	}
+	return ""
+}
+
+func lookupSticky(key string, eligible []pluginapi.SchedulerAuthCandidate) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	now := time.Now()
+	stickyMu.Lock()
+	defer stickyMu.Unlock()
+	entry, ok := sticky[key]
+	if !ok || now.Sub(entry.lastUsed) > stickyTTL {
+		return "", false
+	}
+	for _, c := range eligible {
+		if c.ID == entry.authID {
+			entry.lastUsed = now
+			sticky[key] = entry
+			return entry.authID, true
+		}
+	}
+	return "", false
+}
+
+func rememberSticky(key, authID string) {
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	stickyMu.Lock()
+	defer stickyMu.Unlock()
+	for k, entry := range sticky {
+		if now.Sub(entry.lastUsed) > stickyTTL {
+			delete(sticky, k)
+		}
+	}
+	sticky[key] = stickyEntry{authID: authID, lastUsed: now}
 }
 
 func loadedConfig() pluginConfig {
